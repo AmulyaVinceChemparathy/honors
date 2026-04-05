@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 
-# Before importing mp_v3_train (TensorFlow), keep stderr quieter during tests
+# Reduce TensorFlow / MediaPipe logs
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 os.environ.setdefault("GLOG_minloglevel", "2")
 
@@ -25,34 +25,39 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent
 MP_V3_TRAIN = REPO_ROOT / "mp_v3_train.py"
 
-
 _DEPS_HINT = (
     'pip install tensorflow opencv-python "mediapipe>=0.10.9,<0.10.31" scikit-learn numpy'
 )
 
 
+# 🔍 Check if local mediapipe.py is shadowing real package
 def _mediapipe_shadow_path() -> str | None:
-    """A local mediapipe.py shadows the real package and breaks mp.solutions."""
     p = REPO_ROOT / "mediapipe.py"
     return str(p) if p.is_file() else None
 
 
+# 🔍 Improve import error messages
 def _enrich_import_error(exc: BaseException) -> str:
     msg = f"{type(exc).__name__}: {exc}"
+
     if isinstance(exc, AttributeError) and "solutions" in str(exc):
         msg += (
-            " | New MediaPipe removed mp.solutions (use a build before 0.10.31). "
-            'Try: pip uninstall -y mediapipe && pip install "mediapipe>=0.10.9,<0.10.31"'
+            "\nFix: MediaPipe version incompatible.\n"
+            "Run:\n"
+            '  pip uninstall -y mediapipe\n'
+            '  pip install "mediapipe>=0.10.9,<0.10.31"\n'
         )
+
         if sh := _mediapipe_shadow_path():
-            msg += f" | Remove/rename file: {sh}"
+            msg += f"\nAlso remove/rename local file: {sh}"
+
     return msg
 
 
+# 🔍 Try importing main file
 def _try_import_mp_v3_train():
     try:
-        import mp_v3_train  # noqa: F401 — module under test
-
+        import mp_v3_train
         return mp_v3_train, None
     except Exception as e:
         return None, _enrich_import_error(e)
@@ -60,61 +65,87 @@ def _try_import_mp_v3_train():
 
 MP, _MP_IMPORT_ERROR = _try_import_mp_v3_train()
 HAS_MP = MP is not None
-# unittest uses the second arg to skipUnless only when the condition is false; keep it short but informative
-_SKIP_HELPERS_REASON = (
-    (_MP_IMPORT_ERROR + f" — {_DEPS_HINT}") if _MP_IMPORT_ERROR else ""
-)
 
+_SKIP_HELPERS_REASON = _MP_IMPORT_ERROR or "mp_v3_train import failed"
+
+# Show helpful message if import fails
 if not HAS_MP and __name__ == "__main__":
-    print(f"[mp_v3_train_tests] Optional tests skipped: {_MP_IMPORT_ERROR}")
-    print(f"[mp_v3_train_tests] Generic deps: {_DEPS_HINT}")
-    if sh := _mediapipe_shadow_path():
-        print(f"[mp_v3_train_tests] WARNING: rename/remove {sh} — it shadows the mediapipe package.")
+    print(f"[INFO] Optional tests skipped:")
+    print(_MP_IMPORT_ERROR)
+    print(f"[INFO] Install dependencies:\n{_DEPS_HINT}")
 
+    if sh := _mediapipe_shadow_path():
+        print(f"[WARNING] Remove shadow file: {sh}")
+
+# Import numpy only if main module loads
 if HAS_MP:
     import numpy as np
 else:
-    np = None  # type: ignore
+    np = None
 
 
+# ==========================================
+# ✅ TEST 1: Syntax Check (Always runs)
+# ==========================================
 class TestMpV3TrainSyntax(unittest.TestCase):
-    def test_mp_v3_train_compiles(self) -> None:
+    def test_mp_v3_train_compiles(self):
         py_compile.compile(str(MP_V3_TRAIN), doraise=True)
 
 
-@unittest.skipUnless(HAS_MP, _SKIP_HELPERS_REASON or "mp_v3_train import failed")
+# ==========================================
+# ✅ TEST 2: Functional Tests (Optional)
+# ==========================================
+@unittest.skipUnless(HAS_MP, _SKIP_HELPERS_REASON)
 class TestMpV3TrainHelpers(unittest.TestCase):
-    def test_get_all_sign_folders_finds_leaf_with_video(self) -> None:
-        assert MP is not None
+
+    def test_get_all_sign_folders_finds_leaf_with_video(self):
         with tempfile.TemporaryDirectory() as root:
             leaf = os.path.join(root, "Adjectives", "hello")
             os.makedirs(leaf)
-            Path(leaf, "clip.mp4").touch()
-            folders = MP.get_all_sign_folders(root)
-            abs_leaf = os.path.abspath(leaf)
-            self.assertIn(abs_leaf, [os.path.abspath(p) for p in folders])
 
-    def test_load_full_npy_dataset_builds_mapping(self) -> None:
-        assert MP is not None
+            # create dummy video file
+            Path(leaf, "clip.mp4").touch()
+
+            folders = MP.get_all_sign_folders(root)
+
+            self.assertIn(
+                os.path.abspath(leaf),
+                [os.path.abspath(p) for p in folders]
+            )
+
+    def test_load_full_npy_dataset_builds_mapping(self):
         with tempfile.TemporaryDirectory() as root:
             a = os.path.join(root, "class_a")
             b = os.path.join(root, "class_b")
+
             os.makedirs(a)
             os.makedirs(b)
+
             dummy = np.zeros((MP.MAX_FRAMES, MP.COMBINED_DIM), dtype=np.float32)
+
             np.save(os.path.join(a, "v1.npy"), dummy)
             np.save(os.path.join(b, "v2.npy"), dummy)
+
             X, y, mapping = MP.load_full_npy_dataset(root)
+
             self.assertEqual(X.shape[0], 2)
             self.assertEqual(len(mapping), 2)
             self.assertEqual(set(y.tolist()), {0, 1})
 
-    def test_build_robust_isl_model_output_shape(self) -> None:
-        assert MP is not None
+    def test_build_robust_isl_model_output_shape(self):
         num_classes = 7
-        model = MP.build_robust_isl_model(MP.MAX_FRAMES, MP.COMBINED_DIM, num_classes)
+
+        model = MP.build_robust_isl_model(
+            MP.MAX_FRAMES,
+            MP.COMBINED_DIM,
+            num_classes
+        )
+
         self.assertEqual(model.output_shape[-1], num_classes)
 
 
+# ==========================================
+# 🚀 RUN TESTS
+# ==========================================
 if __name__ == "__main__":
     unittest.main(verbosity=2)
